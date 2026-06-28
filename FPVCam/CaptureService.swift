@@ -1,25 +1,17 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreMedia
 
-// Actor-owned capture session. Drives both Metal preview and AVAssetWriter recording
-// from a single AVCaptureVideoDataOutput — never attaches a preview layer.
-actor CaptureService: NSObject {
+actor CaptureService {
 
-    // MARK: - Published state (main-actor observers poll these)
     private(set) var isRunning = false
     private(set) var isAuthorized = false
 
-    // MARK: - Internals
     private let session = AVCaptureSession()
-    private let videoOutput = AVCaptureVideoDataOutput()
-    private let audioOutput = AVCaptureAudioDataOutput()
+    let videoOutput = AVCaptureVideoDataOutput()
+    let audioOutput = AVCaptureAudioDataOutput()
     private let outputQueue = DispatchQueue(label: "com.senulmapa.fpvcam.capture", qos: .userInteractive)
 
-    // Weak refs so actors can receive frames without retain cycles
-    weak var videoDelegate: (any AVCaptureVideoDataOutputSampleBufferDelegate)?
-    weak var audioDelegate: (any AVCaptureAudioDataOutputSampleBufferDelegate)?
-
-    // MARK: - Setup
+    // MARK: - Configure
 
     func configure(settings: SettingsStore) async throws {
         guard await requestPermissions() else { return }
@@ -27,12 +19,10 @@ actor CaptureService: NSObject {
 
         session.beginConfiguration()
         session.sessionPreset = settings.resolution.sessionPreset
-
         try addVideoInput()
         try addAudioInput()
         setupVideoOutput()
         setupAudioOutput()
-
         session.commitConfiguration()
     }
 
@@ -52,16 +42,14 @@ actor CaptureService: NSObject {
     }
 
     private func addAudioInput() throws {
-        guard let device = AVCaptureDevice.default(for: .audio) else { return }
-        let input = try AVCaptureDeviceInput(device: device)
-        guard session.canAddInput(input) else { return }
+        guard let device = AVCaptureDevice.default(for: .audio),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else { return }
         session.addInput(input)
     }
 
     private func setupVideoOutput() {
-        videoOutput.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-        ]
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
         videoOutput.alwaysDiscardsLateVideoFrames = true
         guard session.canAddOutput(videoOutput) else { return }
         session.addOutput(videoOutput)
@@ -73,15 +61,13 @@ actor CaptureService: NSObject {
         session.addOutput(audioOutput)
     }
 
-    // MARK: - Delegates (set before start)
+    // MARK: - Delegates
 
-    func setVideoDelegate(_ d: any AVCaptureVideoDataOutputSampleBufferDelegate) {
-        videoDelegate = d
+    func setVideoDelegate(_ d: (any AVCaptureVideoDataOutputSampleBufferDelegate)?) {
         videoOutput.setSampleBufferDelegate(d, queue: outputQueue)
     }
 
-    func setAudioDelegate(_ d: any AVCaptureAudioDataOutputSampleBufferDelegate) {
-        audioDelegate = d
+    func setAudioDelegate(_ d: (any AVCaptureAudioDataOutputSampleBufferDelegate)?) {
         audioOutput.setSampleBufferDelegate(d, queue: outputQueue)
     }
 
@@ -102,23 +88,23 @@ actor CaptureService: NSObject {
     // MARK: - Device tuning
 
     func apply(settings: SettingsStore) throws {
-        guard let device = (session.inputs.compactMap { $0 as? AVCaptureDeviceInput }.first?.device) else { return }
+        guard let device = session.inputs
+            .compactMap({ $0 as? AVCaptureDeviceInput })
+            .first?.device else { return }
+
         try device.lockForConfiguration()
         defer { device.unlockForConfiguration() }
 
-        // Zoom
         device.videoZoomFactor = max(device.minAvailableVideoZoomFactor,
                                      min(settings.zoomFactor, device.maxAvailableVideoZoomFactor))
 
-        // Frame rate
-        let targetFPS = CMTime(value: 1, timescale: CMTimeScale(settings.frameRate.rawValue))
-        let supported = device.activeFormat.videoSupportedFrameRateRanges
-        if supported.contains(where: { $0.minFrameDuration <= targetFPS && $0.maxFrameDuration >= targetFPS }) {
-            device.activeVideoMinFrameDuration = targetFPS
-            device.activeVideoMaxFrameDuration = targetFPS
+        let targetDuration = CMTime(value: 1, timescale: CMTimeScale(settings.frameRate.rawValue))
+        let ranges = device.activeFormat.videoSupportedFrameRateRanges
+        if ranges.contains(where: { $0.minFrameDuration <= targetDuration && $0.maxFrameDuration >= targetDuration }) {
+            device.activeVideoMinFrameDuration = targetDuration
+            device.activeVideoMaxFrameDuration = targetDuration
         }
 
-        // Stabilization
         if let conn = videoOutput.connection(with: .video), conn.isVideoStabilizationSupported {
             conn.preferredVideoStabilizationMode = settings.stabilizationEnabled ? .auto : .off
         }

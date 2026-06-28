@@ -1,115 +1,131 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Photos
 
-// Wraps AVAssetWriter to record raw CMSampleBuffers from CaptureService.
-// The video track gets the undistorted CVPixelBuffer — no split-view baked in.
-final class Recorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+// Thread-safe recorder. Video frames are forwarded from MetalSplitRenderer (capture queue).
+// Audio frames arrive via AVCaptureAudioDataOutputSampleBufferDelegate (same queue).
+final class Recorder: NSObject, @unchecked Sendable {
 
+    private let lock = NSLock()
     private var assetWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var audioInput: AVAssetWriterInput?
     private var sessionStarted = false
+    private var _isRecording = false
 
-    private(set) var isRecording = false
+    var isRecording: Bool { lock.withLock { _isRecording } }
 
-    // MARK: - Start / Stop
+    // MARK: - Start / Stop (call from main actor)
 
     func startRecording(outputURL: URL, videoSize: CGSize) throws {
-        guard !isRecording else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard !_isRecording else { return }
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.hevc,
-            AVVideoWidthKey: videoSize.width,
-            AVVideoHeightKey: videoSize.height,
-        ]
-        let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        let vInput = AVAssetWriterInput(
+            mediaType: .video,
+            outputSettings: [
+                AVVideoCodecKey: AVVideoCodecType.hevc,
+                AVVideoWidthKey: videoSize.width,
+                AVVideoHeightKey: videoSize.height,
+            ]
+        )
         vInput.expectsMediaDataInRealTime = true
-        vInput.transform = CGAffineTransform(rotationAngle: 0)
 
-        let aSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 44100,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 128_000,
-        ]
-        let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: aSettings)
+        let aInput = AVAssetWriterInput(
+            mediaType: .audio,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44100,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 128_000,
+            ]
+        )
         aInput.expectsMediaDataInRealTime = true
 
         writer.add(vInput)
         writer.add(aInput)
-
-        self.assetWriter = writer
-        self.videoInput = vInput
-        self.audioInput = aInput
-        self.sessionStarted = false
-        self.isRecording = true
-
         writer.startWriting()
+
+        assetWriter = writer
+        videoInput = vInput
+        audioInput = aInput
+        sessionStarted = false
+        _isRecording = true
     }
 
     func stopRecording() async -> URL? {
-        guard isRecording, let writer = assetWriter else { return nil }
-        isRecording = false
-        videoInput?.markAsFinished()
-        audioInput?.markAsFinished()
+        let writer: AVAssetWriter? = lock.withLock {
+            guard _isRecording else { return nil }
+            _isRecording = false
+            videoInput?.markAsFinished()
+            audioInput?.markAsFinished()
+            return assetWriter
+        }
+        guard let writer else { return nil }
 
         await writer.finishWriting()
-
         let url = writer.outputURL
-        assetWriter = nil
-        videoInput = nil
-        audioInput = nil
-        sessionStarted = false
+
+        lock.withLock {
+            assetWriter = nil
+            videoInput = nil
+            audioInput = nil
+            sessionStarted = false
+        }
 
         await saveToPhotos(url: url)
         return url
     }
 
-    // MARK: - Sample buffer ingestion
+    // MARK: - Buffer appending (called from capture queue)
 
+    func appendVideo(_ sampleBuffer: CMSampleBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard _isRecording,
+              let writer = assetWriter, writer.status == .writing,
+              let vInput = videoInput, vInput.isReadyForMoreMediaData else { return }
+
+        if !sessionStarted {
+            writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            sessionStarted = true
+        }
+        vInput.append(sampleBuffer)
+    }
+
+    // MARK: - AVCaptureAudioDataOutputSampleBufferDelegate
+}
+
+extension Recorder: AVCaptureAudioDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard isRecording,
-              let writer = assetWriter,
-              writer.status == .writing else { return }
-
-        let isVideo = connection.mediaType == .video
-
-        if !sessionStarted {
-            let ts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            writer.startSession(atSourceTime: ts)
-            sessionStarted = true
-        }
-
-        if isVideo, let vInput = videoInput, vInput.isReadyForMoreMediaData {
-            vInput.append(sampleBuffer)
-        } else if !isVideo, let aInput = audioInput, aInput.isReadyForMoreMediaData {
-            aInput.append(sampleBuffer)
-        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard _isRecording,
+              let writer = assetWriter, writer.status == .writing,
+              sessionStarted,                             // don't append audio before video session starts
+              let aInput = audioInput, aInput.isReadyForMoreMediaData else { return }
+        aInput.append(sampleBuffer)
     }
+}
 
-    // MARK: - Save to Photos
+// MARK: - Photos save
 
-    private func saveToPhotos(url: URL) async {
-        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard status == .authorized || status == .limited else { return }
-
-        do {
-            try await PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
-            }
-        } catch {
-            print("FPVCam: failed to save to Photos — \(error)")
+private extension Recorder {
+    func saveToPhotos(url: URL) async {
+        guard await PHPhotoLibrary.requestAuthorization(for: .addOnly) == .authorized else { return }
+        try? await PHPhotoLibrary.shared().performChanges {
+            PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
         }
     }
 }
 
 extension Recorder {
     static func tempURL() -> URL {
-        let dir = FileManager.default.temporaryDirectory
-        return dir.appendingPathComponent("fpvcam-\(Int(Date.now.timeIntervalSince1970)).mov")
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("fpvcam-\(Int(Date.now.timeIntervalSince1970)).mov")
     }
 }
