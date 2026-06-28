@@ -61,7 +61,7 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
     }
 
     // Called by MetalViewHost.makeUIView — binds this renderer to the view that will display it
-    func configure(mtkView: MTKView) {
+    @MainActor func configure(mtkView: MTKView) {
         mtkView.device = device
         mtkView.colorPixelFormat = .bgra8Unorm
         mtkView.framebufferOnly = true

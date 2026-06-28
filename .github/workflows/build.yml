@@ -38,6 +38,7 @@ jobs:
             SKIP_INSTALL=NO \
             MARKETING_VERSION="$RELEASE_VERSION" \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 \
             -archivePath "$RUNNER_TEMP/FPVCam.xcarchive" \
             archive
 
