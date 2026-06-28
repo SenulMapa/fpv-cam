@@ -74,7 +74,9 @@ jobs:
       contents: write
     env:
       RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
-      IPA_DOWNLOAD_URL: https://github.com/SenulMapa/fpv-cam/releases/latest/download/FPVCam.ipa
+      # Versioned (not /latest/) so the manifest version and the IPA it links can never
+      # drift apart — a stale SideStore cache then fetches the matching build, not "newest".
+      IPA_DOWNLOAD_URL: https://github.com/SenulMapa/fpv-cam/releases/download/v${{ needs.build.outputs.release_version }}/FPVCam.ipa
     steps:
       - uses: actions/checkout@v4
 
