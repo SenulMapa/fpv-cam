@@ -7,16 +7,17 @@ on:
     branches: [main]
 
 jobs:
+  # Runs on every push and PR — read-only, safe for fork PRs
   build:
     runs-on: macos-15
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      release_version: ${{ steps.version.outputs.release_version }}
     steps:
       - uses: actions/checkout@v4
 
-      # Select the newest Xcode on the runner so the iOS 26 SDK is available
-      # (the macos-15 image defaults to Xcode 16.4 / iOS 18.5). Matches the
-      # shipping Hermes/Tani pipelines and lets us build the real 26.0 target.
+      # Select the newest Xcode on the runner so the iOS 26 SDK is available.
       - name: Select latest stable Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -28,14 +29,12 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      # Compute version up front so it can be baked into the build AND advertised in
-      # source.json. Without this the bundle ships as 1.0/1 forever and AltStore never
-      # detects updates. Computed unconditionally so PR builds still archive cleanly.
       - name: Set version
+        id: version
         run: |
           VERSION="$(date +%Y.%m.%d.%H%M)"
           echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "IPA_DOWNLOAD_URL=https://github.com/SenulMapa/fpv-cam/releases/latest/download/FPVCam.ipa" >> "$GITHUB_ENV"
+          echo "release_version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build (unsigned)
         run: |
@@ -64,27 +63,42 @@ jobs:
         with:
           name: FPVCam-unsigned
           path: ${{ runner.temp }}/ipa/FPVCam.ipa
+          retention-days: 7
+
+  # Runs only on main push — separate job with write access, never triggered by PRs
+  release:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
+      IPA_DOWNLOAD_URL: https://github.com/SenulMapa/fpv-cam/releases/latest/download/FPVCam.ipa
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download IPA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: FPVCam-unsigned
+          path: /tmp/ipa
 
       - name: Create GitHub Release
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
         run: |
           gh release create "v$RELEASE_VERSION" \
-            "$RUNNER_TEMP/ipa/FPVCam.ipa" \
+            /tmp/ipa/FPVCam.ipa \
             --title "FPV Cam $RELEASE_VERSION" \
             --notes "Unsigned build — sideload via AltStore" \
             --latest
 
       - name: Update AltStore source.json
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
-          IPA_DOWNLOAD_URL: ${{ env.IPA_DOWNLOAD_URL }}
         run: |
-          IPA_PATH="$RUNNER_TEMP/ipa/FPVCam.ipa" python3 - <<'EOF'
+          IPA_PATH="/tmp/ipa/FPVCam.ipa" python3 - <<'EOF'
           import json, os, datetime
           version = os.environ["RELEASE_VERSION"]
           ipa_url = os.environ["IPA_DOWNLOAD_URL"]
