@@ -1,0 +1,88 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild \
+            -project FPVCam.xcodeproj \
+            -scheme FPVCam \
+            -sdk iphoneos \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            SKIP_INSTALL=NO \
+            -archivePath "$RUNNER_TEMP/FPVCam.xcarchive" \
+            archive
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -r "$RUNNER_TEMP/FPVCam.xcarchive/Products/Applications/FPVCam.app" \
+            "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -r FPVCam.ipa Payload/
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FPVCam-unsigned
+          path: ${{ runner.temp }}/ipa/FPVCam.ipa
+
+      - name: Set release version
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          VERSION="$(date +%Y.%m.%d.%H%M)"
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "IPA_DOWNLOAD_URL=https://github.com/SenulMapa/fpv-cam/releases/latest/download/FPVCam.ipa" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+        run: |
+          gh release create "v$RELEASE_VERSION" \
+            "$RUNNER_TEMP/ipa/FPVCam.ipa" \
+            --title "FPV Cam $RELEASE_VERSION" \
+            --notes "Unsigned build — sideload via AltStore" \
+            --latest
+
+      - name: Update AltStore source.json
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+          IPA_DOWNLOAD_URL: ${{ env.IPA_DOWNLOAD_URL }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          version = os.environ["RELEASE_VERSION"]
+          ipa_url = os.environ["IPA_DOWNLOAD_URL"]
+          with open("source.json") as f:
+              src = json.load(f)
+          src["apps"][0]["versions"][0]["version"] = version
+          src["apps"][0]["versions"][0]["downloadURL"] = ipa_url
+          with open("source.json", "w") as f:
+              json.dump(src, f, indent=2)
+          EOF
+          git config user.email "ci@github.com"
+          git config user.name "CI"
+          git add source.json
+          git commit -m "chore: update source.json to $RELEASE_VERSION [skip ci]"
+          git push

@@ -1,0 +1,32 @@
+name: FPVCam
+options:
+  bundleIdPrefix: com.senulmapa
+  deploymentTarget:
+    iOS: "26.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    PRODUCT_BUNDLE_IDENTIFIER: com.senulmapa.fpvcam
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    CODE_SIGNING_ALLOWED: "NO"
+    ENABLE_BITCODE: "NO"
+    TARGETED_DEVICE_FAMILY: "1"
+    INFOPLIST_FILE: FPVCam/Info.plist
+    DEVELOPMENT_ASSET_PATHS: '"FPVCam/Preview Content"'
+
+targets:
+  FPVCam:
+    type: application
+    platform: iOS
+    sources:
+      - path: FPVCam
+    resources:
+      - path: FPVCam/Assets.xcassets
+      - path: FPVCam/Preview Content
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies: []

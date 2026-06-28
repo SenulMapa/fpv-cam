@@ -1,0 +1,7 @@
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+.build/
+*.ipa
+*.dSYM
+.DS_Store

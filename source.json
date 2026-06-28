@@ -1,0 +1,25 @@
+{
+  "name": "SenulMapa",
+  "identifier": "com.senulmapa.altstore",
+  "apps": [
+    {
+      "name": "FPV Cam",
+      "bundleIdentifier": "com.senulmapa.fpvcam",
+      "developerName": "SenulMapa",
+      "subtitle": "Head-mount first-person camera",
+      "localizedDescription": "Streams your iPhone camera as a split-view VR passthrough while recording clean undistorted video.",
+      "iconURL": "https://raw.githubusercontent.com/SenulMapa/fpv-cam/main/docs/icon.png",
+      "tintColor": "000000",
+      "category": "utilities",
+      "versions": [
+        {
+          "version": "0.0.0",
+          "date": "2026-06-29",
+          "downloadURL": "https://github.com/SenulMapa/fpv-cam/releases/latest/download/FPVCam.ipa",
+          "size": 0,
+          "minOSVersion": "26.0"
+        }
+      ]
+    }
+  ]
+}
