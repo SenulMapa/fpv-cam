@@ -13,6 +13,8 @@ struct ContentView: View {
     @State private var torchOn       = false
     @State private var showSettings  = false
     @State private var errorMessage: String?
+    /// Refreshed from renderer.measuredLatencyMs at ~5 Hz; only visible when showLatencyHUD is on.
+    @State private var displayLatencyMs: Double = 0
 
     // Shorthand accessors
     private var video:    VideoSettings    { settings.video    }
@@ -173,12 +175,41 @@ struct ContentView: View {
                     .padding()
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
+
+            // Latency HUD — bottom-left badge showing rolling-average pipeline latency.
+            // Measures capture-to-draw-call-start (software pipeline only; excludes sensor
+            // exposure time and display scan-out).  Toggle in Settings → Overlay.
+            if video.showLatencyHUD {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Text("~\(Int(displayLatencyMs.rounded())) ms")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.yellow)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 4))
+                            .padding(.leading, 16)
+                            .padding(.bottom, 120)
+                        Spacer()
+                    }
+                }
+            }
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(settings: settings)
                 .onDisappear { syncSettings() }
         }
         .task { await startCapture() }
+        .task(id: video.showLatencyHUD) {
+            // Poll the renderer's rolling-average latency at ~5 Hz for the HUD readout.
+            // Low frequency is intentional: the value is for informational display only.
+            guard video.showLatencyHUD else { return }
+            while !Task.isCancelled {
+                displayLatencyMs = renderer?.measuredLatencyMs ?? 0
+                try? await Task.sleep(nanoseconds: 200_000_000)  // 200 ms → 5 Hz
+            }
+        }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
     }
@@ -293,11 +324,10 @@ struct ContentView: View {
     // MARK: - Helpers
 
     private func lensLabel(for factor: CGFloat) -> String {
-        if factor == 0.5 { return ".5×" }
-        if factor == 1.0 { return "1×"  }
-        if factor == 2.0 { return "2×"  }
-        if factor == 5.0 { return "5×"  }
-        return String(format: "%.1f×", factor)
+        // Display labels are derived from the real optical switch points and stored in
+        // LensSettings by CaptureService.populateLensInfo — e.g. on a triple-camera the
+        // underlying videoZoomFactor 1.0 maps to ".5×", 2.0 to "1×", 6.0 to "3×".
+        lens.lensDisplayLabels[factor] ?? String(format: "%.1f×", factor)
     }
 }
 

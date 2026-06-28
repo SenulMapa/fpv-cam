@@ -9,7 +9,7 @@ final class VideoSettings {
     // MARK: - Session settings
 
     var resolution: Resolution = .hd1080p
-    var frameRate: FrameRate = .fps30
+    var frameRate: FrameRate = .fps60
     /// P0-A: default OFF — stabilization buffers a window of frames, adding 150–300 ms latency.
     /// For live FPV passthrough the dominant lag source; leave post-process stabilization to editing.
     var stabilizationEnabled: Bool = false
@@ -19,6 +19,13 @@ final class VideoSettings {
 
     var ipd: Float = 0.064       // metres; default 64 mm
     var showCenterGrid: Bool = false
+
+    // MARK: - Latency HUD (toggleable; default on so we can measure out-of-box)
+
+    /// When true, a rolling-average capture-to-draw latency estimate is shown as a small badge.
+    /// This measures the software pipeline portion (capture queue → Metal draw call start);
+    /// it does NOT include sensor exposure time or display scan-out delay.
+    var showLatencyHUD: Bool = true
 
     // MARK: - Constraint matrix (populated by CaptureService.configure after device discovery)
 

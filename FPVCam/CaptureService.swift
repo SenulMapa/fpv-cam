@@ -112,10 +112,47 @@ actor CaptureService {
         lens.maxZoomFactor = maxZ
         lens.hasTorch = device.hasTorch
 
-        // Discrete zoom levels: show 0.5× / 1× / 2× / 5× that fall within device range.
-        let candidates: [CGFloat] = [0.5, 1.0, 2.0, 5.0]
-        let available = candidates.filter { $0 >= minZ - 0.01 && $0 <= maxZ + 0.01 }
-        lens.availableZoomFactors = available.isEmpty ? [1.0] : available
+        // Derive the real optical switch points from the device rather than hardcoding [0.5,1,2,5].
+        // `virtualDeviceSwitchOverVideoZoomFactors` contains the videoZoomFactor values where
+        // AVFoundation transitions from one physical lens to the next.
+        let switchOvers = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
+
+        // Build the candidate set: the ultrawide base (minZ), the digital-1× (1.0 if in range),
+        // and every optical switch point.
+        var rawFactors: [CGFloat] = [minZ, 1.0] + switchOvers
+        let sortedFactors = Array(Set(rawFactors))
+            .sorted()
+            .filter { $0 >= minZ - 0.01 && $0 <= maxZ + 0.01 }
+
+        // Determine the "1× wide" base: on devices with an ultrawide the first switch-over is
+        // where the main/wide lens engages.  On a single/dual-camera-only device, wideBase = 1.0.
+        let hasUltrawide = device.deviceType == .builtInTripleCamera
+                        || device.deviceType == .builtInDualWideCamera
+        let wideBase: CGFloat = (hasUltrawide && !switchOvers.isEmpty) ? switchOvers[0] : 1.0
+
+        // Compute human-readable display labels as display-multiplier = videoZoomFactor / wideBase.
+        var labels: [CGFloat: String] = [:]
+        for factor in sortedFactors {
+            labels[factor] = lensDisplayLabel(for: factor / wideBase)
+        }
+
+        lens.availableZoomFactors  = sortedFactors.isEmpty ? [1.0] : sortedFactors
+        lens.lensDisplayLabels     = labels.isEmpty ? [1.0: "1×"] : labels
+        // Start at the "1×" wide position (wideBase) so the main camera is active on launch.
+        lens.zoomFactor = sortedFactors.contains(wideBase) ? wideBase : (sortedFactors.first ?? 1.0)
+    }
+
+    /// Converts a display multiplier (relative to the wide-camera base) to a label string.
+    /// 0.5 → ".5×",  1.0 → "1×",  3.0 → "3×",  2.5 → "2.5×"
+    private func lensDisplayLabel(for multiplier: CGFloat) -> String {
+        let rounded = multiplier.rounded()
+        if abs(multiplier - rounded) < 0.05, rounded >= 1 {
+            return "\(Int(rounded))×"
+        }
+        // Fractional multiplier — strip the leading "0" to match the conventional ".5×" style.
+        let s = String(format: "%.1f", multiplier)   // e.g. "0.5"
+        if s.hasPrefix("0.") { return "." + s.dropFirst(2) + "×" }  // → ".5×"
+        return s + "×"
     }
 
     private func populateSupportedFormats(device: AVCaptureDevice, video: VideoSettings) {
@@ -324,8 +361,13 @@ actor CaptureService {
 
     func setManualExposure(iso: Float, durationSeconds: Double) throws {
         guard let device = videoDevice else { return }
+        // Defensive: NSExceptions from AVFoundation are uncatchable via try/catch, so validate
+        // all inputs and check mode support before touching the device.
+        guard iso.isFinite, durationSeconds.isFinite, durationSeconds > 0 else { return }
+        guard device.isExposureModeSupported(.custom) else { return }
         try device.lockForConfiguration()
         defer { device.unlockForConfiguration() }
+        // Clamp to the CURRENT activeFormat limits (they change when the format changes).
         let fmt = device.activeFormat
         let clampedISO = max(fmt.minISO, min(iso, fmt.maxISO))
         let raw = CMTime(seconds: durationSeconds, preferredTimescale: 1_000_000)
@@ -347,6 +389,10 @@ actor CaptureService {
 
     func setManualFocus(lensPosition: Float) throws {
         guard let device = videoDevice else { return }
+        // Defensive: validate input and guard mode support before calling into AVFoundation.
+        guard lensPosition.isFinite else { return }
+        guard device.isFocusModeSupported(.locked),
+              device.isLockingFocusWithCustomLensPositionSupported else { return }
         try device.lockForConfiguration()
         defer { device.unlockForConfiguration() }
         device.setFocusModeLocked(lensPosition: max(0.0, min(lensPosition, 1.0)))
@@ -356,11 +402,19 @@ actor CaptureService {
 
     func setManualWhiteBalance(temp: Float, tint: Float) throws {
         guard let device = videoDevice, device.isWhiteBalanceModeSupported(.locked) else { return }
+        // Defensive: `setWhiteBalanceModeLocked` raises an uncatchable NSException for NaN/infinite
+        // gains or gains that hit the float boundary of maxWhiteBalanceGain exactly.
+        // Validate inputs before calling into AVFoundation.
+        guard temp.isFinite, tint.isFinite else { return }
         try device.lockForConfiguration()
         defer { device.unlockForConfiguration() }
         let ttv = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: temp, tint: tint)
         var g = device.deviceWhiteBalanceGains(for: ttv)
-        let m = device.maxWhiteBalanceGain
+        // Guard against NaN/infinite gains that deviceWhiteBalanceGains can produce for extreme temps.
+        guard g.redGain.isFinite, g.greenGain.isFinite, g.blueGain.isFinite else { return }
+        // Back off the upper bound by a small epsilon: inclusive-boundary values (exactly == max)
+        // are rejected by AVFoundation in some firmware versions.
+        let m = device.maxWhiteBalanceGain - 0.0001
         g.redGain   = max(1.0, min(g.redGain,   m))
         g.greenGain = max(1.0, min(g.greenGain, m))
         g.blueGain  = max(1.0, min(g.blueGain,  m))
