@@ -70,7 +70,8 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
         mtkView.isPaused = false
         mtkView.enableSetNeedsDisplay = false
         // P0-A: reduce Metal drawable buffering from default 3 → 2 to cut up to one frame of lag.
-        mtkView.maximumDrawableCount = 2
+        // maximumDrawableCount lives on CAMetalLayer (the underlying layer of MTKView on iOS).
+        (mtkView.layer as? CAMetalLayer)?.maximumDrawableCount = 2
     }
 
     // MARK: - Frame ingestion (capture queue)

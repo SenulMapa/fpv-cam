@@ -1,3 +1,4 @@
+import CoreGraphics
 import Observation
 
 /// Lens selection and zoom state.
