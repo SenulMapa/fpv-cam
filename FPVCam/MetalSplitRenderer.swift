@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 import Metal
 import MetalKit
+import QuartzCore
 import CoreVideo
 
 final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -14,11 +15,25 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
 
     // MARK: - Frame state (guarded by textureLock; accessed from capture queue + MTKView thread)
     private var latestTexture: MTLTexture?
+    /// Retained alongside latestTexture to ensure the MTLTexture's backing IOSurface stays alive
+    /// between captureOutput and the next draw call.
+    private var latestCVTex: CVMetalTexture?
+    /// Presentation timestamp of the latest frame in host-clock seconds (CACurrentMediaTime domain).
+    private var latestPTSSeconds: Double = 0
     private let textureLock = NSLock()
 
     // MARK: - Rendering params (written once from main, read from MTKView thread — stale-frame is acceptable)
     nonisolated(unsafe) var ipd: Float = 0.064
     nonisolated(unsafe) var showCenterGrid: Bool = false
+
+    // MARK: - Latency HUD
+    /// Rolling-average estimate of the software pipeline latency: from when the frame was captured
+    /// (CMSampleBuffer PTS) to when the Metal draw call begins.  This covers the AVFoundation
+    /// capture queue → texture upload → draw-call start portion only; it does NOT include sensor
+    /// exposure time, ISP processing before the PTS is stamped, or display scan-out delay.
+    /// Written only on the MTKView draw thread; safe to read from the main thread at low frequency
+    /// (Double read/write on 64-bit ARM is hardware-atomic for this display-only purpose).
+    nonisolated(unsafe) var measuredLatencyMs: Double = 0
 
     // Recorder receives forwarded video frames for clean recording
     weak var recorder: Recorder?
@@ -92,21 +107,43 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
         CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .bgra8Unorm, w, h, 0, &cvTex)
 
         // P0-A: flush the cache each frame to prevent drift / stale-texture stutter.
+        // Safe to do here: cvTex is still retained by the local variable so the newly created
+        // texture is not evicted — the flush only discards older unreferenced entries.
         CVMetalTextureCacheFlush(cache, 0)
 
         guard let cvTex, let tex = CVMetalTextureGetTexture(cvTex) else { return }
 
+        // Capture the presentation timestamp for latency measurement (same clock as CACurrentMediaTime).
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
         textureLock.lock()
         latestTexture = tex
+        // Retain the CVMetalTexture so its backing IOSurface (and thus the MTLTexture) stays valid
+        // until after the next draw call consumes it.
+        latestCVTex   = cvTex
+        if pts.isValid { latestPTSSeconds = pts.seconds }
         textureLock.unlock()
     }
 
     // MARK: - MTKViewDelegate (MTKView display-link thread)
 
     func draw(in view: MTKView) {
+        // Snapshot current frame's texture and capture timestamp atomically.
+        let drawTime = CACurrentMediaTime()
         textureLock.lock()
         let tex = latestTexture
+        let pts = latestPTSSeconds
         textureLock.unlock()
+
+        // Update rolling-average latency estimate (EMA, α=0.15).
+        // Sanity-check: pts > 0 means we've received at least one frame; cap at 2 s to ignore
+        // stale values after startup or a format switch.
+        if pts > 0 {
+            let rawMs = (drawTime - pts) * 1000.0
+            if rawMs > 0 && rawMs < 2000 {
+                measuredLatencyMs = measuredLatencyMs * 0.85 + rawMs * 0.15
+            }
+        }
 
         guard let tex,
               let drawable = view.currentDrawable,

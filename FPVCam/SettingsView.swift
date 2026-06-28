@@ -110,6 +110,14 @@ struct SettingsView: View {
                     Toggle("Center Grid Line",
                            isOn: Binding(get: { video.showCenterGrid },
                                          set: { video.showCenterGrid = $0 }))
+                    Toggle("Latency HUD",
+                           isOn: Binding(get: { video.showLatencyHUD },
+                                         set: { video.showLatencyHUD = $0 }))
+                    if video.showLatencyHUD {
+                        Text("Shows a rolling-average estimate of the software pipeline latency (capture→draw). Excludes sensor exposure time and display scan-out delay.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 // MARK: - Latency note
