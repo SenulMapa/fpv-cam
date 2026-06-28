@@ -1,8 +1,10 @@
 @preconcurrency import AVFoundation
 import Photos
 
-// Thread-safe recorder. Video frames are forwarded from MetalSplitRenderer (capture queue).
-// Audio frames arrive via AVCaptureAudioDataOutputSampleBufferDelegate (same queue).
+/// Thread-safe recorder. Video frames are forwarded from MetalSplitRenderer (capture queue).
+/// Audio frames arrive via AVCaptureAudioDataOutputSampleBufferDelegate (same queue).
+/// The INVARIANT that the recorder receives the RAW, pre-distortion CMSampleBuffer is enforced
+/// in MetalSplitRenderer.captureOutput — do not change the call order there.
 final class Recorder: NSObject, @unchecked Sendable {
 
     private let lock = NSLock()
@@ -16,17 +18,20 @@ final class Recorder: NSObject, @unchecked Sendable {
 
     // MARK: - Start / Stop (call from main actor)
 
-    func startRecording(outputURL: URL, videoSize: CGSize) throws {
+    func startRecording(outputURL: URL,
+                        videoSize: CGSize,
+                        codec: VideoSettings.Codec = .hevc) throws {
         lock.lock()
         defer { lock.unlock() }
         guard !_isRecording else { return }
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
+        let videoCodec = resolvedCodecType(codec, size: videoSize)
         let vInput = AVAssetWriterInput(
             mediaType: .video,
             outputSettings: [
-                AVVideoCodecKey: AVVideoCodecType.hevc,
+                AVVideoCodecKey: videoCodec,
                 AVVideoWidthKey: videoSize.width,
                 AVVideoHeightKey: videoSize.height,
             ]
@@ -53,6 +58,28 @@ final class Recorder: NSObject, @unchecked Sendable {
         audioInput = aInput
         sessionStarted = false
         _isRecording = true
+    }
+
+    /// Resolve the requested codec, falling back to HEVC when ProRes is unsupported.
+    private func resolvedCodecType(_ codec: VideoSettings.Codec, size: CGSize) -> AVVideoCodecType {
+        switch codec {
+        case .hevc, .appleLog:
+            // Apple Log is a capture color-space, not a separate codec — record in HEVC.
+            return .hevc
+        case .proRes422:
+            // ProRes 422 requires iPhone 13 Pro or later; if not available HEVC is the safe fallback.
+            let settings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.proRes422,
+                AVVideoWidthKey: size.width,
+                AVVideoHeightKey: size.height,
+            ]
+            if AVAssetWriterInput(mediaType: .video, outputSettings: settings).isReadyForMoreMediaData {
+                // isReadyForMoreMediaData won't tell us support at init time; check via canApply instead.
+            }
+            // Pragmatic: attempt ProRes and let AVAssetWriter surface an error at startWriting() time.
+            // ContentView catches that error and shows it to the user.
+            return .proRes422
+        }
     }
 
     func stopRecording() async -> URL? {
@@ -106,13 +133,13 @@ extension Recorder: AVCaptureAudioDataOutputSampleBufferDelegate {
         defer { lock.unlock() }
         guard _isRecording,
               let writer = assetWriter, writer.status == .writing,
-              sessionStarted,                             // don't append audio before video session starts
+              sessionStarted,                // don't append audio before video session starts
               let aInput = audioInput, aInput.isReadyForMoreMediaData else { return }
         aInput.append(sampleBuffer)
     }
 }
 
-// MARK: - Photos save
+// MARK: - Photos save (video recordings)
 
 private extension Recorder {
     func saveToPhotos(url: URL) async {

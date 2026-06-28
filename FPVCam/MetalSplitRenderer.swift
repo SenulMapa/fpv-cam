@@ -25,7 +25,7 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
 
     // MARK: - Init
 
-    init?(settings: SettingsStore) {
+    init?(video: VideoSettings) {
         guard
             let dev = MTLCreateSystemDefaultDevice(),
             let queue = dev.makeCommandQueue(),
@@ -56,11 +56,11 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
 
         super.init()
 
-        ipd = settings.ipd
-        showCenterGrid = settings.showCenterGrid
+        ipd = video.ipd
+        showCenterGrid = video.showCenterGrid
     }
 
-    // Called by MetalViewHost.makeUIView — binds this renderer to the view that will display it
+    // Called by MetalViewHost.makeUIView — binds this renderer to the view that will display it.
     @MainActor func configure(mtkView: MTKView) {
         mtkView.device = device
         mtkView.colorPixelFormat = .bgra8Unorm
@@ -69,6 +69,8 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
         mtkView.delegate = self
         mtkView.isPaused = false
         mtkView.enableSetNeedsDisplay = false
+        // P0-A: reduce Metal drawable buffering from default 3 → 2 to cut up to one frame of lag.
+        mtkView.maximumDrawableCount = 2
     }
 
     // MARK: - Frame ingestion (capture queue)
@@ -76,7 +78,7 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        // Forward raw buffer to recorder BEFORE any distortion — this is the clean single-frame recording
+        // INVARIANT: forward the raw, pre-distortion buffer to the recorder first.
         recorder?.appendVideo(sampleBuffer)
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
@@ -87,6 +89,9 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
 
         var cvTex: CVMetalTexture?
         CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .bgra8Unorm, w, h, 0, &cvTex)
+
+        // P0-A: flush the cache each frame to prevent drift / stale-texture stutter.
+        CVMetalTextureCacheFlush(cache, 0)
 
         guard let cvTex, let tex = CVMetalTextureGetTexture(cvTex) else { return }
 
@@ -136,8 +141,8 @@ final class MetalSplitRenderer: NSObject, MTKViewDelegate, AVCaptureVideoDataOut
     }
 
     private func makeEyeParams() -> EyeParams {
-        // Convert physical IPD (metres) to NDC offset fraction
-        // Estimated headset screen width ≈ 0.14 m; each eye covers half the NDC range
+        // Convert physical IPD (metres) to NDC offset fraction.
+        // Estimated headset screen width ≈ 0.14 m; each eye covers half the NDC range.
         EyeParams(ipd: (ipd / 0.14) * 0.5)
     }
 }
