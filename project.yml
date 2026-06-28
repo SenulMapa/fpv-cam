@@ -9,7 +9,7 @@ options:
 settings:
   base:
     PRODUCT_BUNDLE_IDENTIFIER: com.senulmapa.fpvcam
-    SWIFT_VERSION: "6.0"
+    SWIFT_VERSION: "5.10"
     IPHONEOS_DEPLOYMENT_TARGET: "26.0"
     CODE_SIGNING_ALLOWED: "NO"
     ENABLE_BITCODE: "NO"

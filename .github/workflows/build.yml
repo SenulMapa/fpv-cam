@@ -18,6 +18,15 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      # Compute version up front so it can be baked into the build AND advertised in
+      # source.json. Without this the bundle ships as 1.0/1 forever and AltStore never
+      # detects updates. Computed unconditionally so PR builds still archive cleanly.
+      - name: Set version
+        run: |
+          VERSION="$(date +%Y.%m.%d.%H%M)"
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "IPA_DOWNLOAD_URL=https://github.com/SenulMapa/fpv-cam/releases/latest/download/FPVCam.ipa" >> "$GITHUB_ENV"
+
       - name: Build (unsigned)
         run: |
           xcodebuild \
@@ -27,6 +36,8 @@ jobs:
             -configuration Release \
             CODE_SIGNING_ALLOWED=NO \
             SKIP_INSTALL=NO \
+            MARKETING_VERSION="$RELEASE_VERSION" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             -archivePath "$RUNNER_TEMP/FPVCam.xcarchive" \
             archive
 
@@ -43,13 +54,6 @@ jobs:
         with:
           name: FPVCam-unsigned
           path: ${{ runner.temp }}/ipa/FPVCam.ipa
-
-      - name: Set release version
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: |
-          VERSION="$(date +%Y.%m.%d.%H%M)"
-          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "IPA_DOWNLOAD_URL=https://github.com/SenulMapa/fpv-cam/releases/latest/download/FPVCam.ipa" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -70,14 +74,18 @@ jobs:
           RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
           IPA_DOWNLOAD_URL: ${{ env.IPA_DOWNLOAD_URL }}
         run: |
-          python3 - <<'EOF'
-          import json, os
+          IPA_PATH="$RUNNER_TEMP/ipa/FPVCam.ipa" python3 - <<'EOF'
+          import json, os, datetime
           version = os.environ["RELEASE_VERSION"]
           ipa_url = os.environ["IPA_DOWNLOAD_URL"]
+          size = os.path.getsize(os.environ["IPA_PATH"])
           with open("source.json") as f:
               src = json.load(f)
-          src["apps"][0]["versions"][0]["version"] = version
-          src["apps"][0]["versions"][0]["downloadURL"] = ipa_url
+          entry = src["apps"][0]["versions"][0]
+          entry["version"] = version
+          entry["downloadURL"] = ipa_url
+          entry["size"] = size
+          entry["date"] = datetime.date.today().isoformat()
           with open("source.json", "w") as f:
               json.dump(src, f, indent=2)
           EOF
