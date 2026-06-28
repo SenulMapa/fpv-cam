@@ -13,10 +13,10 @@
       "category": "utilities",
       "versions": [
         {
-          "version": "2026.06.28.2041",
+          "version": "2026.06.28.2112",
           "date": "2026-06-28",
-          "downloadURL": "https://github.com/SenulMapa/fpv-cam/releases/download/v2026.06.28.2041/FPVCam.ipa",
-          "size": 120783,
+          "downloadURL": "https://github.com/SenulMapa/fpv-cam/releases/download/v2026.06.28.2112/FPVCam.ipa",
+          "size": 132022,
           "minOSVersion": "26.0"
         }
       ]
